@@ -1,0 +1,104 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinJvmCompilation
+
+plugins {
+  alias(libs.plugins.kotlin)
+  alias(libs.plugins.spotless)
+  alias(libs.plugins.publish)
+  alias(libs.plugins.dokka)
+}
+
+kotlin {
+  explicitApi()
+
+  abiValidation {
+    enabled = true
+  }
+
+  androidNativeArm32()
+  androidNativeArm64()
+  androidNativeX64()
+  androidNativeX86()
+
+  iosArm64()
+  iosSimulatorArm64()
+  iosX64()
+
+  js {
+    nodejs {
+      testTask {
+        useMocha {
+          timeout = "5s"
+        }
+      }
+    }
+  }
+
+  jvm {
+    compilations.configureEach { KotlinJvmCompilation compilation ->
+      compilation.compilerOptions.options.jvmTarget = JvmTarget.JVM_1_8
+      compilation.compilerOptions.options.freeCompilerArgs.add("-Xjvm-default=all")
+    }
+  }
+
+  linuxArm64()
+  linuxX64()
+
+  macosArm64()
+  macosX64()
+
+  mingwX64()
+
+  tvosArm64()
+  tvosSimulatorArm64()
+  tvosX64()
+
+  wasmJs().nodejs()
+  wasmWasi().nodejs()
+
+  watchosArm32()
+  watchosArm64()
+  watchosDeviceArm64()
+  watchosSimulatorArm64()
+  watchosX64()
+
+  applyDefaultHierarchyTemplate {
+    it.group("common") {
+      it.group('nonJvm') {
+        it.group('native') {}
+        it.withJs()
+        it.withWasmJs()
+        it.withWasmWasi()
+      }
+    }
+  }
+
+  sourceSets {
+    commonMain {
+      dependencies {
+        api libs.coroutines.core
+        implementation libs.coroutines.test
+      }
+    }
+    commonTest {
+      dependencies {
+        implementation 'org.jetbrains.kotlin:kotlin-test'
+      }
+    }
+  }
+
+  sourceSets.matching { it.name.endsWith("Test") }.configureEach {
+    it.languageSettings {
+      optIn('kotlinx.coroutines.DelicateCoroutinesApi')
+      optIn('kotlinx.coroutines.InternalCoroutinesApi')
+      optIn('kotlinx.coroutines.ExperimentalCoroutinesApi')
+    }
+  }
+}
+
+spotless {
+  kotlin {
+    target("src/**/*.kt")
+    ktfmt(libs.ktfmt.get().version).googleStyle()
+  }
+}
