@@ -4,13 +4,97 @@
 [Unreleased]: https://github.com/cashapp/turbine/compare/1.2.0...HEAD
 
 ### Added
-- Nothing yet!
+- New replayable state-machine test suite `TurbineStateMachineTest` (`src/commonTest`,
+  runs on every Kotlin target) covering the interaction of Turbine timeouts, coroutine
+  cancellation and unconsumed terminal-event accounting. See the dedicated section below.
 
 ### Changed
 - Nothing yet!
 
 ### Fixed
 - Nothing yet!
+
+### Test-suite notes: timeout, cancel and unconsumed terminal events
+
+Scope. The new file is a pure addition under `src/commonTest`; no production semantics in
+`src/commonMain` were changed. It groups 19 test methods around six state-machine seams and
+locates each seam in a separate method so a single method can be run directly, e.g.
+`./gradlew jvmTest --tests "app.cash.turbine.TurbineStateMachineTest.virtualTimeoutFiresWithTimeoutCauseAndNoRealWait"`,
+before the full multiplatform suite is run.
+
+Implementation choices.
+- No wall-clock waiting. `withAppropriateTimeout` selects its timeout mechanism from the
+  presence of a `TestCoroutineScheduler` element in the calling context: inside `runTest` it
+  must use a wall-clock fallback (a virtual `withTimeout` would never fire), while a context
+  without that element can use virtual `withTimeout`. The tests construct a
+  `CoroutineScope(StandardTestDispatcher(scheduler))` — same dispatcher/scheduler, but without
+  the scheduler context element — which deterministically drives the `withTimeout` branch.
+  Timeouts are therefore set to `1h` of virtual time and still fire; each replay asserts an
+  elapsed wall-clock budget (500ms per iteration, 2s for 20 iterations) that is only
+  satisfiable without real waiting.
+- Boundary matrices are enumerated exhaustively (no randomness): external cancellation is
+  crossed with `{none, items, complete, error, cancellation-error}`, and terminal re-reads are
+  crossed with `{Complete, Error} x {awaitItem, awaitComplete, awaitError, awaitEvent}`. Every
+  matrix cell and every timeout/cancel case replays 20 times in-process; the targeted Gradle
+  task was additionally executed 20 times consecutively with zero failures.
+- Assertions check both the thrown type and its `cause` (e.g. `TimeoutCancellationException`
+  retained as the cause of the Turbine `AssertionError`; the exact upstream `CustomThrowable`
+  instance preserved through `awaitItem`/`awaitComplete` mismatches), and they check precisely
+  which events remain reported as unconsumed, including the message lines.
+
+Coverage gaps in the pre-existing suite that these tests close.
+- Timeout *firing* was only covered through the wall-clock path (`failsOnDefaultTimeout` and
+  friends), never through the virtual `withTimeout` branch; its `TimeoutCancellationException`
+  cause and zero-real-time requirement were untested.
+- No test asserted a Turbine remains readable after a timeout (timeout cancels the awaiting
+  call, not the channel or collect job).
+- External parent cancellation had one happy-path assertion; the matrix now pins the exact
+  report for buffered items, natural completion, fatal errors, and self-inflicted upstream
+  `CancellationException` (the last must be stripped from the report).
+- Repeated `cancel()` / `cancelAndIgnoreRemainingEvents()` /
+  `cancelAndConsumeRemainingEvents()` calls and the asymmetry between cancelling before a
+  terminal event (terminal suppressed) versus after natural completion (terminal still
+  reported) were not pinned down.
+- The documented "terminal state yields the same result every time" contract had no
+  exhaustive reader x terminal-kind matrix, and the surprising fact that a failing
+  `expectNoEvents()` still consumes the head event was not recorded.
+- Nested `turbineScope` error aggregation (unrelated outer failure carrying an inner flow's
+  unconsumed exception with stack trace) and the "healthy siblings are omitted" filtering had
+  no direct coverage.
+
+Adjacent semantics protected against regression.
+- `reportUnconsumedEvents`: CancellationException terminal events stop the drain without being
+  reported; ordinary fatal errors are reported with the item prefix and carried as `cause`.
+- `ChannelTurbine.cancel()`: sets the terminal-suppression flag only when the channel is still
+  open for send, then cancels the channel and joins the collect job.
+- `cancelAndConsumeRemainingEvents` re-reads the persistent closed-channel terminal (a
+  deliberately pinned quirk: the second call after natural completion yields `Complete`
+  again), whereas `cancelAndIgnoreRemainingEvents` and pre-terminal `cancel()` are idempotent.
+- Named diagnostics (`for <name>`) on timeout failures.
+
+Deliberate mutation evidence. Two one-line mutations were applied to production code, proven
+to fail the new tests, and reverted:
+1. In `ChannelTurbine.reportUnconsumedEvents`, dropping the
+   `event.throwable is CancellationException` guard makes the cancellation matrix cell and the
+   nested `turbineScope` aggregation tests fail (upstream cancellations are wrongly reported).
+2. Inverting the scheduler-presence branch in `withAppropriateTimeout` makes
+   `virtualTimeoutFiresWithTimeoutCauseAndNoRealWait` fail — the virtual scope then hangs (the
+   job never completes), exactly the class of bug the virtual-time boundary exists to catch.
+
+Most dangerous counterexample for Kotlin Flow testing / cancellation propagation / virtual
+time, and its regression test. The single most dangerous trap is the context-sensitive timeout
+branch itself: a naive `withTimeout` inside a `runTest` body suspends on the test scheduler and
+the fake clock is driven by the very code that is suspended, so a "3 second" timeout can never
+elapse — tests hang or silently rely on a leaked wall-clock job instead of fake time. The
+regression suite pins both sides of that boundary:
+`virtualTimeoutFiresWithTimeoutCauseAndNoRealWait` and
+`nestedVirtualTimeoutIsDrivenBySchedulerAndCarriesTimeoutCause` prove the virtual
+`withTimeout` branch fires in zero real time with the right cause, while the pre-existing
+`failsOnDefaultTimeout` / `awaitHonorsTestTimeoutNoTimeout` tests continue to cover the
+wall-clock branch used inside `runTest`. The second-most-dangerous trap is treating upstream
+`CancellationException` terminal events as fatal test feedback while a hierarchy is being torn
+down; `externalParentCancelReportsExactlyTheBufferedEventsBoundaryMatrix` pins the exact
+stripping behavior (buffered items are still reported, the cancellation terminal is not).
 
 
 ## [1.2.1] - 2025-06-11
