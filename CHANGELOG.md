@@ -4,7 +4,64 @@
 [Unreleased]: https://github.com/cashapp/turbine/compare/1.2.0...HEAD
 
 ### Added
-- Nothing yet!
+- State-machine test suite for timeout, cancellation, and unconsumed terminal events
+  (`TurbineStateMachineTest`, commonTest, runs on all targets). No product semantics changed.
+
+  Implementation choices:
+  - The suite models a `ReceiveTurbine` as a state machine (COLLECTING -> COMPLETED / FAILED /
+    CANCELLED, plus an ignore-remaining state armed by consuming a terminal event) and pins one
+    falsifiable design assumption per test case.
+  - A boundary matrix (`unconsumedTerminalEventReportMatrix`) crosses four end-of-collection
+    modes (OPEN-COLD, STANDALONE, COMPLETE, ERROR) with 0/1/3 pending items and 0..n consumed
+    items, asserting the exact unconsumed-events message and the presence/absence of a cause.
+  - A generative property (`generatedTracesAreReconstructedByConsumingCancel`) replays 25
+    fixed-seed traces and asserts that consumed ++ remaining reconstructs the full trace and
+    that a consuming cancel always ends on the terminal event. The seed is fixed, so traces
+    are replayable; no randomness is used for synchronization.
+  - No real waiting: virtual time is advanced explicitly with `advanceTimeBy`/`runCurrent`.
+    The single timeout-expiry case uses a fixed 10ms timeout which always expires because
+    nothing is emitted before it; it cannot race an emission. Twenty consecutive runs of the
+    new class showed no timing flakiness.
+  - Mutation-proven: deleting `ignoreTerminalEvents = true` from `ChannelTurbine.cancel()`
+    makes `repeatedCancelIsIdempotent` and the STANDALONE matrix rows fail with
+    "Unconsumed events found: - Complete". The mutation was reverted after verification.
+
+  Gaps in the original coverage that are now closed:
+  - External (parent-scope) cancellation was only pinned for unconsumed items, not for an
+    unconsumed `Complete`, and the silent path (everything consumed, then cancelled) was
+    unpinned.
+  - Repeated `cancel()` was untested; the idempotency of the ignore-terminal-events arming
+    was only implicitly covered by a single JVM-only hot-flow test (`awaitWaitsForEvents`).
+  - Terminal events were never asserted to be re-readable (`awaitComplete`/`awaitError`
+    followed by a misread) with the failure cause intact.
+  - Nested `test {}` blocks had no coverage for failure attribution (inner vs outer name).
+  - Virtual time was only exercised indirectly; nothing pinned that delayed emissions are
+    observable without wall-clock waiting, nor that advancing virtual time past the turbine
+    timeout does not trip it.
+
+  Regression protection for adjacent semantics:
+  - `cancelAndConsumeRemainingEvents` still observes buffered events after `cancel()`
+    (close-not-cancel channel semantics).
+  - `cancelAndIgnoreRemainingEvents` and scope-exit silence after full consumption remain
+    pinned by the matrix' empty-expectation rows and
+    `parentCancellationAfterFullConsumptionRecordsNoFailure`.
+  - Error reports keep the upstream throwable as `cause` (`assertSame`) in both the matrix
+    ERROR rows and the terminal-reread cases, preserving diagnosable context.
+
+  Most dangerous counterexample (Flow testing / cancellation propagation / virtual time):
+  after `cancel()`, the terminal event a turbine reports depends on the upstream flow. A
+  suspending cold flow is closed by its own cancellation with a `CancellationException`,
+  which `reportUnconsumedEvents` silently strips; a standalone (or hot-collected) turbine
+  instead lets `cancel()`'s own `close(null)` win, producing a `Complete` that is only
+  suppressed because `cancel()` arms `ignoreTerminalEvents`. A refactor that drops that
+  arming therefore fails only for the second kind of upstream - a silent, input-dependent
+  change in which events are reported as unconsumed. Regression cases:
+  `repeatedCancelIsIdempotent` and the STANDALONE rows of
+  `unconsumedTerminalEventReportMatrix` (deterministic, dispatcher-independent), with
+  `FlowTest.awaitWaitsForEvents` covering the hot-flow variant. Runner-up counterexample:
+  if the turbine timeout were enforced in virtual time, `runTest`'s time advancement would
+  trip it before any delayed emission; pinned by
+  `virtualTimeBeyondTimeoutDoesNotTripWallclockTimeout`.
 
 ### Changed
 - Nothing yet!
